@@ -1,18 +1,11 @@
 import { NextResponse } from "next/server";
 import { redisHelpers } from "@/lib/redis";
 import connectDB from "@/lib/mongodb";
-import Dataset from "@/app/models/Dataset";
+import Dataset from "@/app/models/Dataset"; // ✅ FIXED: Correct import path
 import { processFile } from "@/lib/fileProcessors";
-import { randomUUID } from 'crypto'; // ✅ Use Node.js built-in instead of uuid package
+import { randomUUID } from 'crypto';
 
-// Increase body size limit for large uploads
-export const config = {
-  api: {
-    bodyParser: {
-      sizeLimit: '10mb', // Chunk size limit
-    },
-  },
-};
+// ✅ REMOVED: No config export needed in Next.js 15
 
 export async function POST(request) {
   try {
@@ -53,7 +46,7 @@ export async function POST(request) {
     }
     
     metadata.uploadedChunks.push(chunkIndex);
-    metadata.uploadedChunks = [...new Set(metadata.uploadedChunks)]; // Remove duplicates
+    metadata.uploadedChunks = [...new Set(metadata.uploadedChunks)];
     
     await redisHelpers.storeUploadMetadata(uploadId, metadata, 1800);
 
@@ -70,6 +63,8 @@ export async function POST(request) {
     const isComplete = metadata.uploadedChunks.length === totalChunks;
 
     if (isComplete) {
+      console.log(`✅ All chunks uploaded for ${filename}, reassembling...`);
+      
       // Reassemble file from chunks
       const chunks = [];
       for (let i = 0; i < totalChunks; i++) {
@@ -84,13 +79,16 @@ export async function POST(request) {
       }
       
       const completeFile = Buffer.concat(chunks);
+      console.log(`📦 File reassembled: ${completeFile.length} bytes`);
       
-      // Process the file (parse or process image)
+      // ✅ CRITICAL: Process file with uploadId for image URL detection
       let processedData;
       try {
-        // Pass uploadId to enable image URL processing
+        console.log(`🔄 Processing file with uploadId: ${uploadId}...`);
         processedData = await processFile(completeFile, filename, mimeType, uploadId);
+        console.log(`✅ File processed. Type: ${processedData.type}, Has images: ${processedData.data.hasImages || false}`);
       } catch (error) {
+        console.error("❌ File processing error:", error);
         return NextResponse.json(
           { error: `File processing failed: ${error.message}` },
           { status: 500 }
@@ -105,6 +103,7 @@ export async function POST(request) {
           ...processedData.data
         });
       } else {
+        console.log(`💾 Storing dataset preview in Redis...`);
         await redisHelpers.storeDatasetPreview(uploadId, processedData.data);
       }
 
@@ -136,11 +135,16 @@ export async function POST(request) {
       }
 
       const dataset = await Dataset.create(datasetData);
+      console.log(`✅ Dataset saved to MongoDB: ${dataset._id}`);
 
-      // Clean up chunks from Redis (keep preview for 30 mins)
+      // Clean up chunks from Redis
+      console.log(`🧹 Cleaning up ${totalChunks} chunks from Redis...`);
       for (let i = 0; i < totalChunks; i++) {
-        const key = `upload:${uploadId}:chunk:${i}`;
-        await redisHelpers.cleanupUpload(uploadId);
+        try {
+          await redisHelpers.cleanupUpload(uploadId);
+        } catch (cleanupError) {
+          console.warn(`Warning: Failed to cleanup chunk ${i}:`, cleanupError);
+        }
       }
 
       return NextResponse.json({
@@ -163,7 +167,7 @@ export async function POST(request) {
     });
 
   } catch (error) {
-    console.error("Chunk upload error:", error);
+    console.error("❌ Chunk upload error:", error);
     return NextResponse.json(
       { error: "Chunk upload failed", details: error.message },
       { status: 500 }
@@ -191,7 +195,8 @@ export async function PUT(request) {
       );
     }
 
-    const uploadId = randomUUID(); // ✅ Use randomUUID instead of uuidv4
+    const uploadId = randomUUID();
+    console.log(`🆔 Generated upload ID: ${uploadId} for file: ${filename}`);
     
     // Calculate optimal chunk size (5MB for files > 50MB, else 2MB)
     const chunkSize = fileSize > 50 * 1024 * 1024 ? 5 * 1024 * 1024 : 2 * 1024 * 1024;
@@ -209,6 +214,7 @@ export async function PUT(request) {
     };
 
     await redisHelpers.storeUploadMetadata(uploadId, metadata, 1800);
+    console.log(`✅ Upload initialized: ${totalChunks} chunks of ${(chunkSize / 1024 / 1024).toFixed(2)}MB each`);
 
     return NextResponse.json({
       success: true,
@@ -218,7 +224,7 @@ export async function PUT(request) {
     });
 
   } catch (error) {
-    console.error("Upload initialization error:", error);
+    console.error("❌ Upload initialization error:", error);
     return NextResponse.json(
       { error: "Failed to initialize upload" },
       { status: 500 }
